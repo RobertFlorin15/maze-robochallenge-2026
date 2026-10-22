@@ -7,7 +7,6 @@
 
 static inline float clampf(float x, float a, float b) { return x < a ? a : (x > b ? b : x); }
 static inline float signf(float x) { return x < 0 ? -1.0f : 1.0f; }
-static const float COS45 = 0.70710678f;
 static const float MM_PER_COUNT = (float)PI * WHEEL_DIAMETER_MM / ENC_COUNTS_PER_REV;
 
 #ifndef ESP_ARDUINO_VERSION_MAJOR
@@ -206,8 +205,6 @@ static TickType_t lastWake;
 static inline int dL()  { return S.mm[TOF_L]; }
 static inline int dR()  { return S.mm[TOF_R]; }
 static inline int dF()  { return S.mm[TOF_F]; }
-static inline int dFL() { return S.mm[TOF_FL]; }
-static inline int dFR() { return S.mm[TOF_FR]; }
 static inline int dHand()  { return HAND > 0 ? dL() : dR(); }
 static inline int dOpp()   { return HAND > 0 ? dR() : dL(); }
 
@@ -275,8 +272,8 @@ static void step() {
 #if DEBUG_SERIAL
   if (millis() - lastDbg > 100) {
     lastDbg = millis();
-    Serial.printf("%-8s L%4d FL%4d F%4d FR%4d R%4d | odo %6.0f | out %.2f %.2f | v %4.0f %4.0f\n",
-                  stateName, dL(), dFL(), dF(), dFR(), dR(), odomMm(), outL, outR, velL, velR);
+    Serial.printf("%-8s L%4d F%4d R%4d | odo %6.0f | out %.2f %.2f | v %4.0f %4.0f\n",
+                  stateName, dL(), dF(), dR(), odomMm(), outL, outR, velL, velR);
   }
 #endif
 }
@@ -300,24 +297,20 @@ static float travelMm(const Travel& t) {
   return o;
 }
 
-static float lastLat = 0; static int lastMode = -1;
+static float lastLat = 0, latSlope = 0, slopeOdo = 0; static int lastMode = -1;
+static uint32_t lastSideSeq = 0;
 #if USE_ENCODERS
 static int32_t holdRef = 0;
 #endif
 
 static float wallSteer() {
-  const float dt = CONTROL_PERIOD_MS / 1000.0f;
-  int l = dL(), r = dR(), fl = dFL(), fr = dFR();
+  int l = dL(), r = dR();
   bool wl = l < WALL_PRESENT_MM, wr = r < WALL_PRESENT_MM;
-  bool hl = wl && fl < l * 1.4142f + DIAG_VALID_EXTRA_MM;
-  bool hr = wr && fr < r * 1.4142f + DIAG_VALID_EXTRA_MM;
-  float headL = hl ? (l - fl * COS45) : 0;
-  float headR = hr ? (r - fr * COS45) : 0;
 
-  int mode; float lat, head;
-  if (wl && wr)  { mode = 0; lat = (r - l) * 0.5f;           head = (headL - headR) * 0.5f; }
-  else if (wl)   { mode = 1; lat = SIDE_TARGET_MM - l;       head = headL; }
-  else if (wr)   { mode = 2; lat = r - SIDE_TARGET_MM;       head = -headR; }
+  int mode; float lat;
+  if (wl && wr)  { mode = 0; lat = (r - l) * 0.5f; }
+  else if (wl)   { mode = 1; lat = SIDE_TARGET_MM - l; }
+  else if (wr)   { mode = 2; lat = r - SIDE_TARGET_MM; }
   else {
 #if USE_ENCODERS
     int32_t diff = rdEncL() - rdEncR();
@@ -331,9 +324,17 @@ static float wallSteer() {
 #if USE_ENCODERS
   holdRef = rdEncL() - rdEncR();
 #endif
-  float dlat = (mode == lastMode) ? (lat - lastLat) / dt : 0;
-  lastLat = lat; lastMode = mode;
-  float s = KP_LAT * lat + KD_LAT * dlat + KP_HEAD * head;
+  uint32_t seq = S.seq[TOF_L] + S.seq[TOF_R];
+  float odo = odomMm();
+  if (mode != lastMode) {
+    latSlope = 0; lastLat = lat; slopeOdo = odo;
+  } else if (seq != lastSideSeq && fabsf(odo - slopeOdo) >= SLOPE_MIN_MM) {
+    float sl = clampf((lat - lastLat) / (odo - slopeOdo), -0.6f, 0.6f);
+    latSlope += SLOPE_FILT * (sl - latSlope);
+    lastLat = lat; slopeOdo = odo;
+  }
+  lastSideSeq = seq; lastMode = mode;
+  float s = KP_LAT * lat + KP_SLOPE * latSlope;
   return clampf(s, -MAX_STEER, MAX_STEER);
 }
 static void followStep(float vBase) {
@@ -345,16 +346,14 @@ static void followStep(float vBase) {
   setDrive(v, s);
 }
 
-static uint32_t exitSince = 0;
+static bool exitCand = false; static float exitOdo0 = 0;
+static inline bool allFar(int mm) { return dL() > mm && dF() > mm && dR() > mm; }
 static bool exitDetected() {
-  if (millis() - tRun0 < EXIT_MIN_TIME_MS) { exitSince = 0; return false; }
-  bool cand = dFL() > EXIT_FAR_MM && dFR() > EXIT_FAR_MM && dF() > EXIT_FAR_MM &&
-              (dL() > EXIT_FAR_MM || dR() > EXIT_FAR_MM);
-  if (!cand) { exitSince = 0; return false; }
-  if (!exitSince) exitSince = millis();
-  return millis() - exitSince >= EXIT_CONFIRM_MS;
+  if (millis() - tRun0 < EXIT_MIN_TIME_MS || !allFar(EXIT_FAR_MM)) { exitCand = false; return false; }
+  if (!exitCand) { exitCand = true; exitOdo0 = odomMm(); }
+  return odomMm() - exitOdo0 >= EXIT_CONFIRM_MM;
 }
-static void doExit() {
+static bool doExit() {
   stateName = "EXIT";
   Travel t = travelStart(); t.useFront = false;
 #if USE_ENCODERS
@@ -370,8 +369,16 @@ static void doExit() {
     step();
   }
   stopHard(80);
+  settle(60);
+  exitCand = false;
+  if (!allFar((int)(EXIT_FAR_MM * 0.8f))) {
+    Serial.println("[EXIT] fals (văd pereți), continui");
+    lastMode = -1;
+    return false;
+  }
   exited = true; finished = true;
   Serial.printf("[EXIT] Afară în %.2f s!\n", (millis() - tRun0) / 1000.0f);
+  return true;
 }
 
 static void pivot(float deg) {
@@ -408,7 +415,7 @@ static bool driveDistance(float mm, float v, bool stopAtFront) {
   for (;;) {
     float rem = mm - travelMm(t);
     if (rem <= 0) return true;
-    if (exitDetected()) { doExit(); return false; }
+    if (exitDetected() && doExit()) return false;
     if (stopAtFront && dF() <= FRONT_TURN_MM + 3) return true;
     float vv = clampf(V_MIN + rem * 0.006f, V_MIN, v);
     float s = wallSteer();
@@ -514,7 +521,12 @@ static void runMaze() {
   stuckT = millis(); stuckOdo = odomMm(); stuckF = dF();
   while (!finished) {
     step();
-    if (exitDetected()) { doExit(); break; }
+    if (exitDetected()) {
+      if (doExit()) break;
+      handPrev = dHand() < WALL_PRESENT_MM ? WS_WALL : WS_OPEN;
+      stuckT = millis(); stuckOdo = odomMm();
+      continue;
+    }
 
     if (handOpeningEvent()) {
       stateName = "ADVANCE";
@@ -597,8 +609,8 @@ static void serialCommands() {
     case 'l': HAND = +1; prefs.putChar("hand", HAND); showHand(); break;
     case 'r': HAND = -1; prefs.putChar("hand", HAND); showHand(); break;
     case 's': readSnapshot();
-      Serial.printf("L%d FL%d F%d FR%d R%d enc %ld %ld (%.0f / %.0f mm) | Vbat %.2f V (x%.2f)\n",
-                    dL(), dFL(), dF(), dFR(), dR(), (long)rdEncL(), (long)rdEncR(),
+      Serial.printf("L%d F%d R%d enc %ld %ld (%.0f / %.0f mm) | Vbat %.2f V (x%.2f)\n",
+                    dL(), dF(), dR(), (long)rdEncL(), (long)rdEncR(),
                     rdEncL() * MM_PER_COUNT, rdEncR() * MM_PER_COUNT, vbat, vbatScale); break;
     case '9': pivot(90); settle(100); break;
     case '8': pivot(180); settle(100); break;

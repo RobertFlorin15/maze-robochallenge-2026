@@ -5,9 +5,9 @@
 #define PIN_SCL            22
 #define I2C_FREQ           400000
 
-enum { TOF_L = 0, TOF_FL, TOF_F, TOF_FR, TOF_R, TOF_COUNT };
-static const uint8_t PIN_XSHUT[TOF_COUNT] = { 16, 17, 18, 19, 23 };
-static const uint8_t TOF_ADDR[TOF_COUNT]  = { 0x10, 0x12, 0x14, 0x16, 0x18 };
+enum { TOF_L = 0, TOF_F, TOF_R, TOF_COUNT };
+static const uint8_t PIN_XSHUT[TOF_COUNT] = { 16, 18, 23 };
+static const uint8_t TOF_ADDR[TOF_COUNT]  = { 0x10, 0x12, 0x14 };
 
 #define PIN_ML_IN1         25
 #define PIN_ML_IN2         26
@@ -53,7 +53,6 @@ static const uint8_t TOF_ADDR[TOF_COUNT]  = { 0x10, 0x12, 0x14, 0x16, 0x18 };
 #define OPEN_MM             (SIDE_TARGET_MM + 115.0f)
 #define FRONT_TURN_MM       (CELL_MM * 0.5f - FRONT_SENSOR_X_MM)
 #define FRONT_SLOW_MM       420.0f
-#define DIAG_VALID_EXTRA_MM 90.0f
 #define OPEN_DETECT_LAG_MM  25.0f
 #define ADVANCE_TO_TURN_MM  (CELL_MM * 0.5f + SIDE_SENSOR_X_MM - OPEN_DETECT_LAG_MM)
 #define ENTER_AFTER_TURN_MM (CELL_MM * 0.5f - SIDE_SENSOR_X_MM + 20.0f)
@@ -72,8 +71,9 @@ static const uint8_t TOF_ADDR[TOF_COUNT]  = { 0x10, 0x12, 0x14, 0x16, 0x18 };
 #define PWM_BITS            10
 
 #define KP_LAT              0.0045f
-#define KD_LAT              0.00030f
-#define KP_HEAD             0.0060f
+#define KP_SLOPE            0.50f
+#define SLOPE_MIN_MM        8.0f
+#define SLOPE_FILT          0.5f
 #define K_ENC_HOLD          0.0080f
 #define MAX_STEER           0.45f
 #define TURN_KP             0.012f
@@ -94,8 +94,8 @@ static const uint8_t TOF_ADDR[TOF_COUNT]  = { 0x10, 0x12, 0x14, 0x16, 0x18 };
 #define TOF_FAR_MM           2000
 #define TOF_STALE_MS         150
 
-#define EXIT_FAR_MM          700
-#define EXIT_CONFIRM_MS      120
+#define EXIT_FAR_MM          900
+#define EXIT_CONFIRM_MM      100
 #define EXIT_MIN_TIME_MS     2500
 #define EXIT_RUNOUT_MM       180
 

@@ -22,13 +22,13 @@ Firmware ESP32 pentru proba **Maze** (regulament: robochallenge.ro/regulation/ma
 ➡️ **Înainte de fiecare meci uită-te pe harta labirintului și pe ce intrare ești pus, apoi alege mâna** cu butonul BOOT (apăsare scurtă). LED-ul arată: **1 clipire = stânga**, **2 clipiri = dreapta**. Alegerea se salvează în flash.
 
 Ce face robotul:
-- **Regulator PD** pe distanța laterală + **corecție de unghi** din senzorul diagonal (`lateral − diag·cos45°`); se centrează pe ambii pereți când există, pe unul singur când lipsește celălalt, iar fără pereți își ține direcția pe encodere (fără encodere merge în buclă deschisă și atunci contează `MOTOR_TRIM`).
+- **Regulator** pe distanța laterală + **corecție de unghi** din panta distanței laterale (cât se schimbă distanța până la perete pe mm parcurs); se centrează pe ambii pereți când există, pe unul singur când lipsește celălalt, iar fără pereți își ține direcția pe encodere (fără encodere merge în buclă deschisă și atunci contează `MOTOR_TRIM`).
 - **Buclă de viteză PI** pe fiecare roată (cu encodere): comanda 0..1 devine viteză țintă, deci roțile merg la fel indiferent de baterie, frecări sau diferențele dintre motoare.
 - **Frânare** proporțională cu distanța frontală, oprire exact în centrul celulei.
 - **Gol pe partea mâinii** → avansează până în centrul golului (calculat din geometria senzorilor) → pivotează → intră în noul culoar.
 - **Perete în față** → mâna liberă? → cealaltă parte liberă? → altfel întoarcere 180°.
 - **Adversar**: dacă obstacolul din față se apropie mai repede decât mergem noi, sau apare brusc, robotul **așteaptă** până la 2,2 s în loc să se întoarcă (o întoarcere inutilă te costă mult timp).
-- **Ieșire**: în labirint razele la 45° lovesc mereu un colț apropiat; când diagonalele + fața văd > 70 cm, robotul a ieșit, mai merge 18 cm ca să fie complet afară și se oprește.
+- **Ieșire**: când toți cei 3 senzori (L, F, R) văd peste 90 cm pe cel puțin 10 cm de mers, robotul mai merge 18 cm ca să fie complet afară, se oprește și verifică din nou. Dacă vede iar pereți, a fost o alarmă falsă (ex. o intersecție cu culoare lungi) și continuă.
 - Senzorii ToF sunt citiți pe **core 0**, controlul rulează la **200 Hz** pe core 1.
 
 ## Hardware recomandat și cablaj
@@ -43,7 +43,7 @@ Ce face robotul:
 | Semnal | GPIO |
 |---|---|
 | I2C SDA / SCL (toți ToF) | 21 / 22 (pull-up 4,7 kΩ dacă modulele nu au) |
-| XSHUT ToF: Stânga, Diag-Stânga, Față, Diag-Dreapta, Dreapta | 16, 17, 18, 19, 23 |
+| XSHUT ToF: Stânga, Față, Dreapta | 16, 18, 23 |
 | DRV8833 motor stâng IN1 / IN2 | 25 / 26 |
 | DRV8833 motor drept IN1 / IN2 | 27 / 14 |
 | Encoder stâng A / B | 32 / 33 |
@@ -53,7 +53,7 @@ Ce face robotul:
 | Tensiune baterie (divizor 100k/47k) | 36 |
 | LED / buton | 2 / 0 (BOOT) |
 
-**Montarea senzorilor:** L și R la 90°, FL și FR la 45°, F drept înainte, toți la ~5–8 cm înălțime (pereții au 15 cm), cât mai în față și cât mai simetric. Măsoară apoi offset-urile și pune-le în `config.h` (vezi mai jos „Referință → 2. Geometrie”).
+**Montarea senzorilor (3× VL53L3CX):** L și R la exact 90° (perpendicular pe direcția de mers, contează pentru estimarea unghiului), F drept înainte, toți la ~5–8 cm înălțime (pereții au 15 cm), cât mai în față și cât mai simetric. Măsoară apoi offset-urile și pune-le în `config.h` (vezi mai jos „Referință → 2. Geometrie”).
 
 ## Instalare
 
@@ -70,7 +70,7 @@ Deschide Serial Monitor la **115200**. Comenzile merg **doar înainte de start**
 
 | Comandă | Ce face |
 |---|---|
-| `s` | afișează cei 5 ToF, encoderele (impulsuri și mm), tensiunea bateriei și factorul de compensare |
+| `s` | afișează cei 3 ToF, encoderele (impulsuri și mm), tensiunea bateriei și factorul de compensare |
 | `l` / `r` | alege mâna stângă / dreaptă (se salvează în flash) |
 | `9` | pivot 90° spre stânga |
 | `8` | pivot 180° |
@@ -83,11 +83,11 @@ Deschide Serial Monitor la **115200**. Comenzile merg **doar înainte de start**
 Cu `DEBUG_SERIAL 1`, în timpul cursei se afișează de 10 ori pe secundă:
 
 ```
-FOLLOW   L 112 FL 160 F 850 FR 158 R 110 | odo   1234 | out 0.78 0.80 | v  470  482
+FOLLOW   L 112 F 850 R 110 | odo   1234 | out 0.78 0.80 | v  470  482
 ```
 
 - **starea**: `FOLLOW` (urmărește peretele), `ADVANCE` (avansează spre un gol), `PIVOT`, `ENTER` (intră în culoar după viraj), `DECIDE` (perete în față), `DEADEND` (fundătură, întoarcere 180°), `OPP_WAIT` (așteaptă adversarul), `UNSTUCK` (deblocare), `EXIT`, `DONE`;
-- **L FL F FR R**: distanțele ToF în mm;
+- **L F R**: distanțele ToF în mm;
 - **odo**: distanța parcursă (mm, media celor două roți);
 - **out**: comanda pe fiecare roată (-1..1) după limitarea accelerației;
 - **v**: viteza măsurată pe fiecare roată (mm/s). Viteza țintă e `out × MM_PER_S_AT_FULL`.
@@ -145,20 +145,23 @@ Verificare: descarcă bateria cu ~0,5 V și repetă `9`/`8`. Cu divizorul montat
 
 ### Regulatorul de perete (ambele variante)
 
-Comanda de direcție e `steer = KP_LAT·eroare_laterală + KD_LAT·viteza_erorii + KP_HEAD·eroare_de_unghi`, limitată la `±MAX_STEER` (`steer > 0` = virează la dreapta).
+Comanda de direcție e `steer = KP_LAT·eroare_laterală + KP_SLOPE·pantă`, limitată la `±MAX_STEER` (`steer > 0` = virează la dreapta).
 
-- Eroarea laterală: cu doi pereți = `(R − L)/2` (se centrează); cu un singur perete = diferența față de `SIDE_TARGET_MM`.
-- Eroarea de unghi: `lateral − diagonală·cos45°` pe fiecare parte. E 0 când robotul e paralel cu peretele. Diagonala e folosită doar dacă e „coerentă” (`diag < lateral·√2 + DIAG_VALID_EXTRA_MM`); altfel înseamnă că raza ei trece pe lângă capătul peretelui.
-- Fără niciun perete: cu encodere robotul ține direcția (`K_ENC_HOLD`), fără encodere merge drept.
+- **Eroarea laterală**: cu doi pereți = `(R − L)/2` (se centrează); cu un singur perete = diferența față de `SIDE_TARGET_MM`.
+- **Panta** = cât s-a schimbat eroarea laterală pe mm parcurs (≈ tangenta unghiului față de perete; 0,1 ≈ 6°). Fără senzori diagonali, ea ține locul corecției de unghi și al termenului derivativ. Se calculează doar la citiri ToF noi și doar după minimum `SLOPE_MIN_MM` de mers, apoi e filtrată cu `SLOPE_FILT` și limitată la ±0,6. Pentru că e pe distanță, nu pe timp, se comportă la fel la orice viteză. Se resetează când se schimbă pereții văzuți (apare/dispare un perete) și după fiecare pivot.
+- **Fără niciun perete**: cu encodere robotul ține direcția (`K_ENC_HOLD`), fără encodere merge drept.
 
 Procedură:
-1. Pornește cu `V_CRUISE = 0.5` într-un culoar drept, lung.
-2. Robotul oscilează (șerpuiește) → scade `KP_LAT` și `KP_HEAD`, crește `KD_LAT`.
+1. Pornește cu `V_CRUISE = 0.5` într-un culoar drept, lung. Pune robotul puțin descentrat și puțin strâmb.
+2. Robotul oscilează (șerpuiește) → crește `KP_SLOPE` (amortizează) sau scade `KP_LAT`.
 3. Robotul se corectează leneș sau se lipește de un perete → crește `KP_LAT`.
-4. Robotul intră strâmb după viraje și își revine greu → crește `KP_HEAD`.
-5. Pe porțiunile fără pereți deviază (cu encodere) → crește `K_ENC_HOLD`; oscilează → scade-l.
-6. Urcă viteza treptat (`V_CRUISE` până la ~0.8–0.9) și refă pașii 2–4. La viteză mare de obicei ai nevoie de `KP` puțin mai mic și `KD` puțin mai mare.
-7. Robotul încetinește singur în corecții mari (`v × (1 − 0,6·|steer|)`), deci dacă stă des la `MAX_STEER`, regulatorul e prea agresiv.
+4. Robotul revine la centru, dar trece de el și apoi se întoarce lent → crește `KP_SLOPE`. Dacă reacționează nervos, în smucituri → scade `KP_SLOPE` sau `SLOPE_FILT`, ori crește `SLOPE_MIN_MM` (pantă calculată pe o bază mai lungă, mai puțin zgomotoasă).
+5. Robotul intră strâmb după viraje → la început panta e 0 (abia se resetase); verifică întâi virajele (`TURN_SCALE`), apoi crește puțin `KP_SLOPE`.
+6. Pe porțiunile fără pereți deviază (cu encodere) → crește `K_ENC_HOLD`; oscilează → scade-l.
+7. Urcă viteza treptat (`V_CRUISE` până la ~0.8–0.9) și refă pașii 2–4.
+8. Robotul încetinește singur în corecții mari (`v × (1 − 0,6·|steer|)`), deci dacă stă des la `MAX_STEER`, regulatorul e prea agresiv.
+
+Cu doar 3 senzori, unghiul se vede abia după ce robotul a mers câțiva mm, deci senzorii L/R trebuie montați exact la 90° și fără joc. Un senzor strâmb cu 5° dă o pantă falsă când robotul merge perfect drept.
 
 ### Virajul în gol
 
@@ -185,8 +188,8 @@ Evită GPIO 6–11 (flash) și 12 (strapping). GPIO 34–39 sunt doar intrare ș
 |---|---|---|
 | `PIN_SDA` / `PIN_SCL` | 21 / 22 | I2C comun pentru toți senzorii ToF |
 | `I2C_FREQ` | 400000 | frecvența I2C (400 kHz) |
-| `PIN_XSHUT[]` | 16, 17, 18, 19, 23 | XSHUT pentru L, FL, F, FR, R (ordinea senzorilor din tabele) |
-| `TOF_ADDR[]` | 0x10 … 0x18 | adresele I2C noi, în format 8-bit cum le cere librăria STM32duino (implicit senzorul are 0x52) |
+| `PIN_XSHUT[]` | 16, 18, 23 | XSHUT pentru L, F, R (ordinea senzorilor din tabele) |
+| `TOF_ADDR[]` | 0x10, 0x12, 0x14 | adresele I2C noi, în format 8-bit cum le cere librăria STM32duino (implicit senzorul are 0x52) |
 | `PIN_ML_IN1/IN2`, `PIN_MR_IN1/IN2` | 25/26, 27/14 | intrările DRV8833 (2 pini PWM pe motor) |
 | `MOTOR_L_INVERT` **[CAL]** | 0 | 1 dacă motorul stâng merge invers |
 | `MOTOR_R_INVERT` **[CAL]** | 1 | motoarele sunt montate în oglindă, deci unul e de obicei inversat |
@@ -227,7 +230,6 @@ Evită GPIO 6–11 (flash) și 12 (strapping). GPIO 34–39 sunt doar intrare ș
 | `OPEN_MM` | `SIDE_TARGET + 115` | peste această distanță e deschidere laterală (între cele două praguri = histerezis) |
 | `FRONT_TURN_MM` | `CELL/2 − FRONT_SENSOR_X` | distanța frontală la care axa roților e în centrul celulei (aici se pivotează) |
 | `FRONT_SLOW_MM` | 420 | de aici începe frânarea spre un perete frontal |
-| `DIAG_VALID_EXTRA_MM` | 90 | toleranța de „coerență” a diagonalei (vezi regulatorul) |
 | `OPEN_DETECT_LAG_MM` | 25 | conul ToF (~25°) vede deschiderea puțin mai târziu decât e de fapt |
 | `ADVANCE_TO_TURN_MM` | `CELL/2 + SIDE_SENSOR_X − LAG` | cât avansezi după detectarea golului ca să ajungi în centrul lui |
 | `ENTER_AFTER_TURN_MM` | `CELL/2 − SIDE_SENSOR_X + 20` | cât mergi drept după un viraj spre mână înainte să „armezi” iar detecția |
@@ -253,8 +255,9 @@ Evită GPIO 6–11 (flash) și 12 (strapping). GPIO 34–39 sunt doar intrare ș
 | Parametru | Implicit | Descriere |
 |---|---|---|
 | `KP_LAT` | 0.0045 | per mm de eroare laterală |
-| `KD_LAT` | 0.00030 | per mm/s de variație a erorii laterale (amortizare) |
-| `KP_HEAD` | 0.0060 | per mm de eroare de unghi (`lateral − diag·cos45°`) |
+| `KP_SLOPE` | 0.50 | per unitate de pantă (mm de eroare laterală / mm parcurs); corecția de unghi și amortizarea |
+| `SLOPE_MIN_MM` | 8 | distanța minimă parcursă între două calcule de pantă (mai mare = mai puțin zgomot, reacție mai lentă) |
+| `SLOPE_FILT` | 0.5 | filtrul pantei (0..1; mai mare = reacție mai rapidă, mai zgomotoasă) |
 | `K_ENC_HOLD` | 0.0080 | ține direcția pe encodere când nu sunt pereți (per mm de diferență între roți) |
 | `MAX_STEER` | 0.45 | limita comenzii de direcție |
 | `TURN_KP` | 0.012 | decelerarea la finalul pivotării cu encodere (per mm de arc rămas); mai mic = frânează mai devreme |
@@ -283,8 +286,8 @@ Din fiecare măsurătoare se ia cea mai apropiată țintă validă. Sub ~25 mm s
 
 | Parametru | Implicit | Descriere |
 |---|---|---|
-| `EXIT_FAR_MM` | 700 | ieșire = F, FL, FR și una dintre laterale văd peste această distanță (în labirint diagonalele lovesc mereu un colț sub ~400 mm) |
-| `EXIT_CONFIRM_MS` | 120 | cât trebuie să dureze condiția de ieșire |
+| `EXIT_FAR_MM` | 900 | ieșire = L, F și R văd toți peste această distanță. După `EXIT_RUNOUT_MM` se reverifică cu 80 % din prag; dacă se văd pereți, robotul continuă. Crește-l dacă labirintul are intersecții cu culoare lungi în toate direcțiile (alarme false); scade-l dacă afară, după poartă, sunt obiecte apropiate (ieșire ratată) |
+| `EXIT_CONFIRM_MM` | 100 | cât trebuie să meargă robotul cu condiția îndeplinită (pe distanță, nu pe timp, ca să nu „iasă” stând pe loc) |
 | `EXIT_MIN_TIME_MS` | 2500 | în primele secunde nu poți „ieși” (ești încă la intrare) |
 | `EXIT_RUNOUT_MM` | 180 | cât mai mergi după ieșire ca să fii complet afară |
 | `OPP_MOTION_MM` | 45 | adversar = obstacolul frontal (sub 600 mm) s-a apropiat cu atât PESTE cât am mers noi, pe ultimele 8 citiri |
@@ -318,6 +321,8 @@ Câteva valori mai rar de schimbat sunt direct în cod:
 | `encoderTest` | comanda 0,6, măsoară între 300 și 600 ms | testul `e` |
 | `updateVbat` | la 20 ms, filtru 0,1 (~200 ms) | filtrarea tensiunii bateriei |
 | `safety` / `loop` | 3 citiri consecutive | filtrarea semnalelor START/STOP |
+| `doExit` | 80 ms frână + 60 ms pauză, prag 80 % din `EXIT_FAR_MM` | reverificarea ieșirii cu robotul oprit |
+| `wallSteer` | pantă limitată la ±0,6 | protecție la salturi ale distanței laterale |
 
 ## Note de implementare
 
