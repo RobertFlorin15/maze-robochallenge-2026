@@ -5,6 +5,16 @@
 #include <soc/gpio_reg.h>
 #include "config.h"
 
+struct Travel;  // prototipurile generate automat pentru .ino apar înaintea definiției
+
+static inline void ledSet(bool on) {
+#if USE_LED
+  digitalWrite(PIN_LED, on);
+#else
+  (void)on;
+#endif
+}
+
 static inline float clampf(float x, float a, float b) { return x < a ? a : (x > b ? b : x); }
 static inline float signf(float x) { return x < 0 ? -1.0f : 1.0f; }
 static const float MM_PER_COUNT = (float)PI * WHEEL_DIAMETER_MM / ENC_COUNTS_PER_REV;
@@ -212,7 +222,7 @@ static void haltForever(const char* why) {
   setTarget(0, 0); outL = outR = 0; brakeReq = true; writeMotors(0, 0); delay(60);
   motorsCoast();
   Serial.printf("[STOP] %s – repornește alimentarea\n", why);
-  for (;;) { digitalWrite(PIN_LED, !digitalRead(PIN_LED)); delay(500); }
+  for (;;) { ledSet((millis() / 500) & 1); delay(10); }
 }
 static uint8_t stopCnt = 0;
 static void safety() {
@@ -551,18 +561,18 @@ static void runMaze() {
     stuckCheck();
   }
   stateName = "DONE";
-  for (;;) { setTarget(0, 0); brakeReq = true; step(); digitalWrite(PIN_LED, (millis() / 100) & 1); }
+  for (;;) { setTarget(0, 0); brakeReq = true; step(); ledSet((millis() / 100) & 1); }
 }
 
 static void showHand() { Serial.printf("[CFG] Regula: mâna %s\n", HAND > 0 ? "STÂNGĂ" : "DREAPTĂ"); }
 static void ledPattern() {
   uint32_t p = millis() % 1200;
   bool on = (p < 120) || (HAND < 0 && p >= 250 && p < 370);
-  digitalWrite(PIN_LED, on);
+  ledSet(on);
 }
 static void errorBlinkForever(const char* why) {
   motorsCoast(); Serial.println(why);
-  for (;;) { digitalWrite(PIN_LED, !digitalRead(PIN_LED)); delay(80); }
+  for (;;) { ledSet((millis() / 80) & 1); delay(10); }
 }
 
 static void encoderTest() {
@@ -626,7 +636,9 @@ static void serialCommands() {
 
 void setup() {
   Serial.begin(115200);
+#if USE_LED
   pinMode(PIN_LED, OUTPUT);
+#endif
   pinMode(PIN_BUTTON, INPUT_PULLUP);
   pinMode(PIN_START, INPUT);
 #if USE_VBAT
@@ -689,7 +701,7 @@ void loop() {
 #endif
   if (go) {
     Serial.println("[GO] Start!");
-    digitalWrite(PIN_LED, HIGH);
+    ledSet(true);
     running = true;
     runMaze();
   }

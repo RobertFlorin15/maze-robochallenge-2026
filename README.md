@@ -43,15 +43,15 @@ Ce face robotul:
 | Semnal | GPIO |
 |---|---|
 | I2C SDA / SCL (toți ToF) | 21 / 22 (pull-up 4,7 kΩ dacă modulele nu au) |
-| XSHUT ToF: Stânga, Față, Dreapta | 16, 18, 23 |
-| DRV8833 motor stâng IN1 / IN2 | 25 / 26 |
-| DRV8833 motor drept IN1 / IN2 | 27 / 14 |
+| XSHUT ToF: Stânga, Față, Dreapta | 15, 2, 23 |
+| DRV8835 motor stâng IN1 / IN2 | 25 / 26 |
+| DRV8835 motor drept IN1 / IN2 | 27 / 14 |
 | Encoder stâng A / B | 32 / 33 |
-| Encoder drept A / B | 4 / 13 |
+| Encoder drept A / B | 34 / 35 (fără pull-up intern) |
 | Encoder VCC / GND (ambele) | 3,3 V / GND |
-| Start module START / KILL | 34 / 35 |
-| Tensiune baterie (divizor 100k/47k) | 36 |
-| LED / buton | 2 / 0 (BOOT) |
+| Start module START / KILL | 18 / 19 |
+| Tensiune baterie | nemontată (`USE_VBAT 0`) |
+| Buton | 0 (BOOT); LED-ul de pe GPIO2 e dezactivat (`USE_LED 0`) |
 
 **Montarea senzorilor (3× VL53L3CX):** L și R la exact 90° (perpendicular pe direcția de mers, contează pentru estimarea unghiului), F drept înainte, toți la ~5–8 cm înălțime (pereții au 15 cm), cât mai în față și cât mai simetric. Măsoară apoi offset-urile și pune-le în `config.h` (vezi mai jos „Referință → 2. Geometrie”).
 
@@ -61,6 +61,8 @@ Ce face robotul:
 2. Library Manager: **STM32duino VL53L3CX** (se instalează cu tot ce-i trebuie).
 3. Deschide `MazeRunner/MazeRunner.ino`, verifică pinii din `config.h`, încarcă.
 4. Pe core-ul 2.x, dacă senzorii dau eroare la init, mărește `I2C_BUFFER_LENGTH` la 256 în `Wire.h` (pe 3.x codul o face singur).
+
+**Alternativ, VS Code + PlatformIO:** deschide folderul proiectului în VS Code (cu extensia PlatformIO IDE). `platformio.ini` folosește core-ul 3.x (platforma `espressif32` 8.x) și instalează singur biblioteca VL53L3CX. Din bara de jos: ✓ Build, → Upload, 🔌 Serial Monitor (115200). Prima compilare descarcă toolchain-ul ESP32 și durează câteva minute.
 
 ## Unelte de calibrare
 
@@ -93,6 +95,8 @@ FOLLOW   L 112 F 850 R 110 | odo   1234 | out 0.78 0.80 | v  470  482
 - **v**: viteza măsurată pe fiecare roată (mm/s). Viteza țintă e `out × MM_PER_S_AT_FULL`.
 
 ### LED și buton
+
+Cu `USE_LED 0` (schema actuală) LED-ul nu se folosește; mâna aleasă și erorile apar doar în Serial Monitor.
 
 - În așteptare: **1 clipire = mâna stângă**, **2 clipiri = mâna dreaptă**.
 - Apăsare scurtă pe BOOT (sub 0,8 s) = schimbă mâna.
@@ -188,22 +192,22 @@ Evită GPIO 6–11 (flash) și 12 (strapping). GPIO 34–39 sunt doar intrare ș
 |---|---|---|
 | `PIN_SDA` / `PIN_SCL` | 21 / 22 | I2C comun pentru toți senzorii ToF |
 | `I2C_FREQ` | 400000 | frecvența I2C (400 kHz) |
-| `PIN_XSHUT[]` | 16, 18, 23 | XSHUT pentru L, F, R (ordinea senzorilor din tabele) |
+| `PIN_XSHUT[]` | 15, 2, 23 | XSHUT pentru L, F, R (ordinea senzorilor din tabele) |
 | `TOF_ADDR[]` | 0x10, 0x12, 0x14 | adresele I2C noi, în format 8-bit cum le cere librăria STM32duino (implicit senzorul are 0x52) |
-| `PIN_ML_IN1/IN2`, `PIN_MR_IN1/IN2` | 25/26, 27/14 | intrările DRV8833 (2 pini PWM pe motor) |
+| `PIN_ML_IN1/IN2`, `PIN_MR_IN1/IN2` | 25/26, 27/14 | intrările DRV8835 (2 pini PWM pe motor, MODE nelegat = IN/IN) |
 | `MOTOR_L_INVERT` **[CAL]** | 0 | 1 dacă motorul stâng merge invers |
 | `MOTOR_R_INVERT` **[CAL]** | 1 | motoarele sunt montate în oglindă, deci unul e de obicei inversat |
-| `PIN_START` | 34 | modul Start/Stop: 0 la pornire, 1 = START, 0 = STOP |
-| `PIN_KILL` | 35 | 1 la pornire, 0 = STOP (opțional) |
+| `PIN_START` | 18 | modul Start/Stop: 0 la pornire, 1 = START, 0 = STOP |
+| `PIN_KILL` | 19 | 1 la pornire, 0 = STOP (opțional) |
 | `USE_KILL_PIN` | 1 | 0 dacă nu ai cablat pinul Kill |
 | `USE_ENCODERS` | 1 | 0 = fără encodere (mers pe timp + ToF) |
-| `PIN_ENC_L_A/B`, `PIN_ENC_R_A/B` | 32/33, 4/13 | fazele A/B ale encoderelor (pull-up intern activat) |
+| `PIN_ENC_L_A/B`, `PIN_ENC_R_A/B` | 32/33, 34/35 | fazele A/B ale encoderelor (pull-up intern doar pe 32/33; 34/35 n-au) |
 | `ENC_L_INVERT` / `ENC_R_INVERT` **[CAL]** | 0 / 1 | sensul de numărare; comanda `e` îți spune dacă trebuie schimbat |
-| `USE_VBAT` | 1 | 0 dacă nu ai montat divizorul de baterie |
+| `USE_VBAT` | 0 | 0 dacă nu ai montat divizorul de baterie |
 | `PIN_VBAT` | 36 | GPIO36 (VP), doar intrare, ADC1 |
 | `VBAT_DIV` **[CAL]** | (100+47)/47 | raportul divizorului; 2S plin (8,4 V) → ~2,7 V pe pin |
 | `VBAT_NOMINAL` **[CAL]** | 7.6 | tensiunea la care ai calibrat vitezele și virajele; PWM-ul se înmulțește cu `VBAT_NOMINAL / Vbat` (limitat la 0,80–1,25; în afara plajei 5,5–9 V compensarea e oprită) |
-| `PIN_LED` | 2 | LED-ul de pe placă |
+| `USE_LED` / `PIN_LED` | 0 / 2 | LED-ul de pe placă; oprit, pentru că GPIO2 e XSHUT-ul senzorului F |
 | `PIN_BUTTON` | 0 | butonul BOOT: apăsare scurtă = schimbă mâna |
 | `TEST_START_BUTTON` | 0 | 1 = pornire din BOOT (ținut 1 s) în loc de modulul IR. **0 la competiție!** |
 

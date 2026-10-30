@@ -6,7 +6,9 @@
 #define I2C_FREQ           400000
 
 enum { TOF_L = 0, TOF_F, TOF_R, TOF_COUNT };
-static const uint8_t PIN_XSHUT[TOF_COUNT] = { 16, 18, 23 };
+// Schema: senzorul de sus = L (GPIO15), mijloc = F (GPIO2), jos = R (GPIO23).
+// Dacă ordinea fizică diferă, schimbă doar ordinea pinilor aici.
+static const uint8_t PIN_XSHUT[TOF_COUNT] = { 15, 2, 23 };
 static const uint8_t TOF_ADDR[TOF_COUNT]  = { 0x10, 0x12, 0x14 };
 
 #define PIN_ML_IN1         25
@@ -16,23 +18,27 @@ static const uint8_t TOF_ADDR[TOF_COUNT]  = { 0x10, 0x12, 0x14 };
 #define MOTOR_L_INVERT     0
 #define MOTOR_R_INVERT     1
 
-#define PIN_START          34
-#define PIN_KILL           35
+#define PIN_START          18
+#define PIN_KILL           19
 #define USE_KILL_PIN       1
 
 #define USE_ENCODERS       1
 #define PIN_ENC_L_A        32
 #define PIN_ENC_L_B        33
-#define PIN_ENC_R_A        4
-#define PIN_ENC_R_B        13
+// GPIO34/35 sunt doar intrare și n-au pull-up intern: encoderul trebuie să aibă ieșiri push-pull
+// sau pull-up extern (10k la 3,3 V).
+#define PIN_ENC_R_A        34
+#define PIN_ENC_R_B        35
 #define ENC_L_INVERT       0
 #define ENC_R_INVERT       1
 
-#define USE_VBAT           1
+#define USE_VBAT           0   // schema nu are divizor de baterie
 #define PIN_VBAT           36
 #define VBAT_DIV           ((100.0f + 47.0f) / 47.0f)
 #define VBAT_NOMINAL       7.6f
 
+// GPIO2 (LED-ul plăcii) e folosit ca XSHUT pentru senzorul F, deci LED-ul e dezactivat.
+#define USE_LED            0
 #define PIN_LED            2
 #define PIN_BUTTON         0
 
