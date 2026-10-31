@@ -16,7 +16,21 @@ static const uint8_t TOF_ADDR[3]  = { 0x30, 0x31, 0x32 };   // adrese I2C pe 7 b
 #define PIN_ML_EN          19   // AENABLE
 #define PIN_MR_PH          23   // BPHASE  – motor drept (BOUT)
 #define PIN_MR_EN          32   // BENABLE
-// Encoderele sunt cablate (stânga 34/35, dreapta 36/39) dar nu sunt folosite.
+
+// ---------------- Encodere ----------------
+// 1 = virajele și distanțele se măsoară cu encoderele. Dacă un encoder nu numără deloc,
+// robotul trece singur pe varianta fără encodere (timp + model de viteză) și scrie [ENC] în Serial.
+#define USE_ENCODERS       1
+#define PIN_ENC_L_A        34   // 34..39: doar intrări, fără pull-up intern
+#define PIN_ENC_L_B        35
+#define PIN_ENC_R_A        36
+#define PIN_ENC_R_B        39
+// Valori de pornire; comanda 'v' măsoară mm/impuls exact (cu senzorul din față) și o salvează.
+#define ENC_COUNTS_PER_MOTOR_REV 12.0f  // Pololu: 12 impulsuri pe rotația motorului (ambele canale, ambele fronturi)
+#define GEAR_RATIO         30.0f        // raportul reductorului (30:1, 50:1...)
+#define WHEEL_DIAMETER_MM  32.0f
+#define TRACK_MM           80.0f        // distanța dintre mijloacele celor două roți
+#define ENC_K_STRAIGHT     0.004f       // fără pereți: ține drumul drept din diferența roților
 
 // 0 = fără telecomandă IR: pornire automată la AUTO_START_MS după alimentare.
 // Orice comandă din Serial anulează pornirea automată (atunci pornești cu 'g').

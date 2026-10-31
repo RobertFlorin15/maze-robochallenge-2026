@@ -25,7 +25,10 @@ struct Params {
   uint16_t t90, t180;   // timpii de pivotare (ms) la V_TURN
   float mmps;           // viteza reală la V_RUN (mm/s)
   float trim;           // corecție dacă robotul trage într-o parte fără pereți
+  float mmpc;           // mm parcurși de roată la un impuls de encoder
+  float k90, k180;      // corecția virajelor cu encodere (1.00 = exact după TRACK_MM)
 };
+static const float DEF_MMPC = PI * WHEEL_DIAMETER_MM / (ENC_COUNTS_PER_MOTOR_REV * GEAR_RATIO);
 static Params P;
 static Preferences prefs;
 static const uint8_t PERMS[6][3] = { {0,1,2}, {0,2,1}, {1,0,2}, {1,2,0}, {2,0,1}, {2,1,0} };
@@ -39,6 +42,9 @@ static void loadParams() {
   P.t180 = prefs.getUShort("t180", DEF_TURN_MS_180);
   P.mmps = prefs.getFloat("mmps", DEF_MM_PER_S_RUN);
   P.trim = prefs.getFloat("trim", 0.0f);
+  P.mmpc = prefs.getFloat("mmpc", DEF_MMPC);
+  P.k90  = prefs.getFloat("k90", 1.0f);
+  P.k180 = prefs.getFloat("k180", 1.0f);
 }
 static void saveParams() {
   prefs.putChar("hand", P.hand);
@@ -46,11 +52,13 @@ static void saveParams() {
   prefs.putUChar("perm", P.perm);
   prefs.putUShort("t90", P.t90); prefs.putUShort("t180", P.t180);
   prefs.putFloat("mmps", P.mmps); prefs.putFloat("trim", P.trim);
+  prefs.putFloat("mmpc", P.mmpc); prefs.putFloat("k90", P.k90); prefs.putFloat("k180", P.k180);
 }
 static void resetParams() {
   P.hand = +1; P.invL = 0; P.invR = 1; P.perm = 0;
   P.t90 = DEF_TURN_MS_90; P.t180 = DEF_TURN_MS_180;
   P.mmps = DEF_MM_PER_S_RUN; P.trim = 0;
+  P.mmpc = DEF_MMPC; P.k90 = 1.0f; P.k180 = 1.0f;
   saveParams();
 }
 static void printParams() {
@@ -60,6 +68,9 @@ static void printParams() {
                 P.perm, P.invL, P.invR);
   Serial.printf("[CFG] t90 %u ms | t180 %u ms | viteză %.0f mm/s | trim %+.2f\n",
                 P.t90, P.t180, P.mmps, P.trim);
+#if USE_ENCODERS
+  Serial.printf("[CFG] encodere: %.3f mm/impuls | k90 %.2f | k180 %.2f\n", P.mmpc, P.k90, P.k180);
+#endif
 }
 
 // ---------------- Motoare ----------------
@@ -114,7 +125,60 @@ static void setDrive(float v, float steer) {
 
 // Fără encodere distanța se estimează din comanda dată motoarelor și viteza măsurată cu 'v'.
 static float odomModelMm = 0;
-static inline float odomMm() { return odomModelMm; }
+
+// ---------------- Encodere ----------------
+// Numărăm fiecare front pe ambele canale. Sensul nu îl luăm din encoder (ar trebui calibrat),
+// ci din comanda dată motorului: roata merge în sensul în care o împingem.
+static volatile int32_t encCnt[2] = {0, 0};
+static volatile uint8_t encAB[2] = {0, 0};
+static const int8_t QUAD[16] = {0, 1, -1, 0, -1, 0, 0, 1, 1, 0, 0, -1, 0, -1, 1, 0};
+static int32_t encPrev[2] = {0, 0};
+static float wheelMm[2] = {0, 0};   // drumul fiecărei roți (+ înainte)
+static bool encSeen[2] = {false, false};
+static float encSilentMs[2] = {0, 0};
+static bool encOk = USE_ENCODERS;
+
+#if USE_ENCODERS
+static void IRAM_ATTR encIsrL() {
+  uint8_t ab = (digitalRead(PIN_ENC_L_A) << 1) | digitalRead(PIN_ENC_L_B);
+  encCnt[0] += QUAD[(encAB[0] << 2) | ab]; encAB[0] = ab;
+}
+static void IRAM_ATTR encIsrR() {
+  uint8_t ab = (digitalRead(PIN_ENC_R_A) << 1) | digitalRead(PIN_ENC_R_B);
+  encCnt[1] += QUAD[(encAB[1] << 2) | ab]; encAB[1] = ab;
+}
+static void encBegin() {
+  const uint8_t pins[4] = { PIN_ENC_L_A, PIN_ENC_L_B, PIN_ENC_R_A, PIN_ENC_R_B };
+  for (uint8_t p : pins) pinMode(p, INPUT);
+  encAB[0] = (digitalRead(PIN_ENC_L_A) << 1) | digitalRead(PIN_ENC_L_B);
+  encAB[1] = (digitalRead(PIN_ENC_R_A) << 1) | digitalRead(PIN_ENC_R_B);
+  attachInterrupt(PIN_ENC_L_A, encIsrL, CHANGE); attachInterrupt(PIN_ENC_L_B, encIsrL, CHANGE);
+  attachInterrupt(PIN_ENC_R_A, encIsrR, CHANGE); attachInterrupt(PIN_ENC_R_B, encIsrR, CHANGE);
+}
+#endif
+
+// Apelat la fiecare pas de control. Un encoder care nu a numărat NICIODATĂ deși motorul lui
+// a fost împins 0,5 s e considerat nelegat (un motor blocat de perete după ce a mers nu contează).
+static void encUpdate(float dt) {
+#if USE_ENCODERS
+  const float out[2] = { outL, outR };
+  for (int i = 0; i < 2; i++) {
+    int32_t c = encCnt[i];
+    int32_t d = abs(c - encPrev[i]);
+    encPrev[i] = c;
+    if (d) encSeen[i] = true;
+    wheelMm[i] += d * P.mmpc * (out[i] < 0 ? -1.0f : 1.0f);
+    if (!encSeen[i] && fabsf(out[i]) > 0.25f) encSilentMs[i] += dt * 1000.0f;
+    if (encOk && encSilentMs[i] > 500) {
+      encOk = false;
+      Serial.printf("[ENC] encoderul %s nu numără: merg mai departe fără encodere\n", i ? "drept" : "stâng");
+    }
+  }
+#else
+  (void)dt;
+#endif
+}
+static inline float encMm() { return (wheelMm[0] + wheelMm[1]) * 0.5f; }
 
 // ---------------- Senzori ToF ----------------
 static VL53L0X tof[3];
@@ -221,11 +285,13 @@ static void step() {
   outR += clampf(tgtR - outR, -maxd, maxd);
   writeMotors(outL, outR);
   odomModelMm += (outL + outR) * 0.5f * (P.mmps / V_RUN) * dt;
+  encUpdate(dt);
 #if DEBUG_SERIAL
   if (running && millis() - lastDbg > 100) {
     lastDbg = millis();
-    Serial.printf("%-8s L%4d F%4d R%4d | odo %6.0f | out %.2f %.2f\n",
-                  stateName, dL(), dF(), dR(), odomMm(), outL, outR);
+    Serial.printf("%-8s L%4d F%4d R%4d | odo %6.0f%s | out %.2f %.2f\n",
+                  stateName, dL(), dF(), dR(), encOk ? encMm() : odomModelMm, encOk ? " enc" : "",
+                  outL, outR);
   }
 #endif
 }
@@ -236,11 +302,15 @@ static void stopHard(uint16_t ms = 40) {
 }
 static void settle(uint16_t ms) { setTarget(0, 0); for (uint16_t t = 0; t < ms; t += CONTROL_PERIOD_MS) step(); }
 
-// Distanța parcursă: din peretele din față când se vede și e plauzibilă, altfel din model.
-struct Travel { float odo0; int front0; bool useFront; };
-static Travel travelStart() { Travel t; t.odo0 = odomMm(); t.front0 = dF(); t.useFront = t.front0 < 1200; return t; }
+// Distanța parcursă: din peretele din față când se vede și e plauzibilă, altfel din encodere
+// (sau din model, dacă encoderele lipsesc). Ținem ambele repere: encoderele pot ceda pe drum.
+struct Travel { float enc0, model0; int front0; bool useFront; };
+static Travel travelStart() {
+  Travel t; t.enc0 = encMm(); t.model0 = odomModelMm; t.front0 = dF(); t.useFront = t.front0 < 1200;
+  return t;
+}
 static float travelMm(const Travel& t) {
-  float o = odomMm() - t.odo0;
+  float o = encOk ? encMm() - t.enc0 : odomModelMm - t.model0;
   if (t.useFront && dF() < 1300) {
     float f = (float)(t.front0 - dF());
     if (f > o * 0.4f - 20 && f < o * 2.0f + 40) return f;
@@ -260,7 +330,14 @@ static float wallSteer() {
   if (wl && wr)  { mode = 0; lat = (r - l) * 0.5f; }
   else if (wl)   { mode = 1; lat = SIDE_TARGET_MM - l; }
   else if (wr)   { mode = 2; lat = r - SIDE_TARGET_MM; }
-  else           { lastMode = 3; return 0; }
+  else {
+    // Fără pereți: cu encodere ținem drumul drept (roata care a mers mai mult încetinește).
+    static float straightRef = 0;
+    float diff = wheelMm[1] - wheelMm[0];
+    if (lastMode != 3) straightRef = diff;
+    lastMode = 3;
+    return encOk ? clampf(ENC_K_STRAIGHT * (diff - straightRef), -0.15f, 0.15f) : 0;
+  }
 
   uint32_t now = millis(), seq = seqSide();
   if (mode != lastMode) {
@@ -310,8 +387,19 @@ static void pivot(int deg) {   // +90 = stânga, -90 = dreapta, ±180 = întoarc
   stateName = "PIVOT";
   stopHard(30);
   float s = deg > 0 ? 1.0f : -1.0f;
-  uint32_t ms = abs(deg) >= 135 ? P.t180 : P.t90;
+  bool big = abs(deg) >= 135;
+  uint32_t ms = big ? P.t180 : P.t90;
   uint32_t t0 = millis();
+  if (encOk) {
+    // Cu encodere: fiecare roată parcurge arcul ei de cerc (TRACK_MM), corectat cu k90 / k180.
+    float arc = PI * TRACK_MM * abs(deg) / 360.0f * (big ? P.k180 : P.k90);
+    float l0 = wheelMm[0], r0 = wheelMm[1];
+    while (encOk && (fabsf(wheelMm[0] - l0) + fabsf(wheelMm[1] - r0)) * 0.5f < arc
+           && millis() - t0 < ms * 3 + 500) {
+      setTarget(-s * V_TURN, s * V_TURN); step();
+    }
+    if (encOk) ms = 0;   // gata; altfel encoderele au cedat pe drum și terminăm pe timp
+  }
   while (millis() - t0 < ms) { setTarget(-s * V_TURN, s * V_TURN); step(); }
   stopHard(40);
   settle(40);
@@ -421,7 +509,10 @@ static void frontDecision() {
 static void runMaze() {
   lastWake = xTaskGetTickCount();
   lastMode = -1; finished = false;
-  tRun0 = millis(); handPrev = WS_OPEN; exitSince = 0;
+  // La start robotul e în poarta din peretele de margine: considerăm că are deja peretele pe partea
+  // mâinii, ca primul gol de acolo să-l facă să vireze și să rămână lipit de margine. Cu WS_OPEN ar
+  // merge drept până la primul perete văzut, care poate fi o „insulă” – în jurul ei s-ar învârti la nesfârșit.
+  tRun0 = millis(); handPrev = WS_WALL; exitSince = 0;
   stuckReset();
   while (!finished) {
     step();
@@ -474,7 +565,8 @@ static void printHelp() {
     " a/b inversează sensul motorului stâng / drept\n"
     " 9/8 pivotare 90 / 180 grade spre stânga\n"
     " +/- timpul ultimei pivotări testate +10 / -10 ms\n"
-    " v   măsoară viteza (robot cu fața la un perete aflat la 60-110 cm)\n"
+    " v   măsoară viteza și mm/impuls (robot cu fața la un perete aflat la 60-110 cm)\n"
+    " e   arată encoderele 5 s (rotește roțile cu mâna)\n"
     " f   mergi o celulă (30 cm) pe culoar\n"
     " q/w trim stânga / dreapta (dacă trage într-o parte)\n"
     " l/r mâna stângă / dreaptă\n"
@@ -499,17 +591,31 @@ static void measureSpeed() {
   readSnapshot();
   if (dF() < 500 || dF() > 1150) { Serial.printf("[VIT] F=%d: pune robotul la 60-110 cm de un perete\n", dF()); return; }
   int f0 = 0; uint32_t tA = 0, t0 = millis();
+  int32_t cA[2] = {0, 0};
   while (millis() - t0 < 1500 && dF() > 300) {
     setDrive(V_RUN, 0); step();
-    if (!tA && millis() - t0 >= 400) { tA = millis(); f0 = dF(); }
+    if (!tA && millis() - t0 >= 400) { tA = millis(); f0 = dF(); cA[0] = encCnt[0]; cA[1] = encCnt[1]; }
   }
   int f1 = dF(); uint32_t tB = millis();
+  int32_t counts = (abs(encCnt[0] - cA[0]) + abs(encCnt[1] - cA[1])) / 2;
   stopHard(80);
   if (!tA || tB - tA < 300) { Serial.println("[VIT] prea scurt, mai încearcă de mai departe"); return; }
   float v = (f0 - f1) * 1000.0f / (tB - tA);
   if (v < 30 || v > 3000) { Serial.printf("[VIT] valoare ciudată (%.0f mm/s), nesalvată\n", v); return; }
-  P.mmps = v; saveParams();
+  P.mmps = v;
+  // Aceeași probă calibrează și encoderele: câți mm a mers robotul la un impuls.
+  if (USE_ENCODERS && counts > 50) {
+    float mmpc = (f0 - f1) / (float)counts;
+    if (mmpc > 0.01f && mmpc < 3.0f) P.mmpc = mmpc;
+    else Serial.printf("[ENC] %.3f mm/impuls pare greșit, nesalvat\n", mmpc);
+  } else if (USE_ENCODERS) {
+    Serial.println("[ENC] encoderele n-au numărat în probă: verifică firele (comanda 'e')");
+  }
+  saveParams();
   Serial.printf("[VIT] %.0f mm/s la V_RUN, salvat\n", v);
+#if USE_ENCODERS
+  Serial.printf("[ENC] %.3f mm/impuls\n", P.mmpc);
+#endif
 }
 
 static void serialCommands() {
@@ -529,12 +635,24 @@ static void serialCommands() {
     case '9': lastTurnTest = 90; pivot(90); break;
     case '8': lastTurnTest = 180; pivot(180); break;
     case '+': case '-': {
+      if (encOk) {   // cu encodere se reglează cât de mult se rotește, nu cât timp
+        float& k = lastTurnTest == 90 ? P.k90 : P.k180;
+        k = clampf(k + (c == '+' ? 0.02f : -0.02f), 0.5f, 2.0f);
+        saveParams(); Serial.printf("[VIRAJ] k%d = %.2f (testează din nou cu '%c')\n",
+                                    lastTurnTest, k, lastTurnTest == 90 ? '9' : '8');
+        break;
+      }
       uint16_t& t = lastTurnTest == 90 ? P.t90 : P.t180;
       t = c == '+' ? t + 10 : (t > 60 ? t - 10 : t);
       saveParams(); Serial.printf("[VIRAJ] t%d = %u ms (testează din nou cu '%c')\n",
                                   lastTurnTest, t, lastTurnTest == 90 ? '9' : '8');
       break;
     }
+    case 'e':
+      Serial.println("[ENC] rotește roțile cu mâna 5 s: numerele trebuie să se schimbe la amândouă");
+      for (uint32_t t0 = millis(); millis() - t0 < 5000; delay(250))
+        Serial.printf("stâng %7ld   drept %7ld\n", (long)encCnt[0], (long)encCnt[1]);
+      break;
     case 'v': measureSpeed(); break;
     case 'f': {
       readSnapshot(); lastMode = -1;
@@ -577,6 +695,9 @@ void setup() {
   pinMode(PIN_ML_PH, OUTPUT); pinMode(PIN_MR_PH, OUTPUT);
   pwmSetup(PIN_ML_EN, 0); pwmSetup(PIN_MR_EN, 1);
   motorsCoast();
+#if USE_ENCODERS
+  encBegin();
+#endif
 
   prefs.begin("maze3", false);
   loadParams();
