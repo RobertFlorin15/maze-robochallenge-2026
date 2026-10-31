@@ -24,37 +24,45 @@ Urmărire de perete cu mâna stângă sau dreaptă:
 
 ➡️ **Înainte de fiecare meci alege mâna** după intrarea pe care ești pus: apăsare scurtă pe BOOT, sau `l` / `r` în Serial. Se salvează în flash.
 
-## Cablaj (după „Maze Electronica Schema Finala.pdf”)
+## Cablaj (după „Maze_ESP32_Componente_si_Conexiuni.docx”)
 
 | Semnal | GPIO |
 |---|---|
-| I2C SDA / SCL (toți ToF) | 21 / 22 |
-| XSHUT senzori (sus / mijloc / jos în schemă) | 15 / 2 / 23 |
-| DRV8835 motor stâng IN1 / IN2 | 25 / 26 |
-| DRV8835 motor drept IN1 / IN2 | 27 / 14 |
-| Start module START / KILL | 18 / 19 (pull-down intern) |
-| Buton | 0 (BOOT) |
+| I2C SDA / SCL (toți senzorii VL53L0X) | 21 / 22 |
+| XSHUT senzori stânga / față / dreapta | 25 / 26 / 27 |
+| DRV8835 (mod PHASE/ENABLE, MODE la 3V3) motor stâng PH / EN | 18 / 19 |
+| DRV8835 motor drept PH / EN | 23 / 32 |
+| Encodere stânga / dreapta (cablate, nefolosite) | 34, 35 / 36, 39 |
+| LED / buton | 2 / 0 (BOOT) |
+| Liber (pentru modulul IR, mai târziu) | 33 |
 
-Encoderele (32/33, 34/35) nu sunt folosite. LED-ul de pe GPIO2 e oprit, pentru că GPIO2 e XSHUT-ul unui senzor.
+Alimentare: LiPo 2S → step-down 6 V pentru motoare (VIN pe DRV8835), step-down 5 V pentru ESP32.
+
+## Pornire
+
+Momentan **fără telecomandă IR** (`USE_START_MODULE 0`): robotul pornește singur la **20 s după alimentare**. LED-ul clipește rapid cât numără; apoi rămâne aprins în cursă.
+- Apăsare scurtă pe BOOT = schimbă mâna **și reîncepe numărătoarea** de 20 s.
+- Orice comandă trimisă din Serial **anulează** pornirea automată (pentru calibrare); după aceea pornești cu `g`.
+- În cursă: BOOT sau orice tastă din Serial oprește robotul (reset cu EN pentru o nouă încercare).
+
+Pentru competiție (modul IR obligatoriu): conectează START la GPIO33 și pune `USE_START_MODULE 1` în `config.h`.
 
 ## Instalare
 
-**VS Code + PlatformIO:** deschide folderul în VS Code. Din bara de jos: ✓ Build, → Upload, 🔌 Serial Monitor (115200). Biblioteca VL53L3CX se instalează singură.
+**VS Code + PlatformIO:** deschide folderul în VS Code. Din bara de jos: ✓ Build, → Upload, 🔌 Serial Monitor (115200). Biblioteca VL53L0X (Pololu) se instalează singură.
 
-**Arduino IDE:** placa *ESP32 Dev Module* (esp32 by Espressif 3.x), biblioteca **STM32duino VL53L3CX**.
-
-⚠️ Dacă upload-ul dă „Failed to connect”: ține apăsat **BOOT** cât timp începe încărcarea. Senzorul de pe GPIO2 trage pinul în sus și încurcă intrarea automată în modul de programare.
+**Arduino IDE:** placa *ESP32 Dev Module* (esp32 by Espressif 3.x), biblioteca **VL53L0X by Pololu**.
 
 ## Testare în 15 minute
 
-Încarcă codul **o singură dată**, deschide Serial Monitor (115200) și fă pașii în ordine. Fiecare reglaj se salvează imediat. `h` afișează lista de comenzi. Dacă robotul se oprește cu „[STOP]”, apasă EN (reset): parametrii rămân salvați.
+Încarcă codul **o singură dată**, deschide Serial Monitor (115200) și trimite orice tastă în primele 20 s, ca robotul să nu pornească singur. Apoi fă pașii în ordine. Fiecare reglaj se salvează imediat. `h` afișează lista de comenzi. Dacă robotul se oprește cu „[STOP]”, apasă EN (reset): parametrii rămân salvați.
 
 1. **Pornire (1 min).** Trebuie să apară `[ToF] GPIO.. OK` de 3 ori. Dacă un senzor dă eroare, verifică firele; codul reîncearcă singur la fiecare secundă.
-2. **Senzori (2 min).** Trimite `s` și ține mâna pe rând în fața senzorului stâng, din față și din dreapta. Valoarea care scade trebuie să fie în coloana corectă (`L`, `F`, `R`). Dacă nu, trimite `p` (trece la următoarea ordine) până e corect.
+2. **Senzori (2 min).** Trimite `s` și ține mâna pe rând în fața senzorului stâng, din față și din dreapta. Valoarea care scade trebuie să fie în coloana corectă (`L`, `F`, `R`); peste ~1,2 m senzorii VL53L0X arată 2000 („nimic”). Dacă nu, trimite `p` (trece la următoarea ordine) până e corect.
 3. **Motoare (2 min).** Ridică robotul. `1` = roata stângă trebuie să meargă **înainte**; dacă merge înapoi, `a`. `2` = roata dreaptă; dacă merge înapoi, `b`.
 4. **Viraj 90° (3 min).** Pune robotul pe podea. `9` = pivotează spre stânga. A rotit prea puțin: `+`; prea mult: `-` (câte 10 ms). Repetă `9` până iese ~90°.
 5. **Viraj 180° (2 min).** La fel cu `8`, apoi `+` / `-`.
-6. **Viteză (1 min).** Robotul cu fața la un perete aflat la 60–120 cm, trimite `v`. Măsoară și salvează viteza reală (contează pentru unde virează la goluri).
+6. **Viteză (1 min).** Robotul cu fața la un perete aflat la 60–110 cm, trimite `v`. Măsoară și salvează viteza reală (contează pentru unde virează la goluri).
 7. **Cursă de test (4 min).** Pune robotul în labirint, alege mâna (`l` / `r`), trimite `g`. Pornește după 2 s; îl oprești cu BOOT sau orice tastă. Urmărește în Serial starea (`FOLLOW`, `ADVANCE`, `PIVOT`, `DECIDE`...).
 
 Dacă mai ai timp:
@@ -62,7 +70,7 @@ Dacă mai ai timp:
 - virează prea devreme sau prea târziu la goluri → refă `v` sau, în cod, ajustează `OPEN_DETECT_LAG_MM` din `config.h`;
 - `f` merge o singură celulă (30 cm), util ca să vezi centrarea pe culoar.
 
-**La competiție:** `TEST_START_BUTTON` trebuie să fie `0` (implicit). Robotul pornește doar din modulul IR.
+**La competiție:** dacă modulul IR e montat, pune `USE_START_MODULE 1` și START pe GPIO33.
 
 ## Parametri (`config.h`)
 

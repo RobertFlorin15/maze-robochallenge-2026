@@ -1,10 +1,7 @@
-// MazeRunner – varianta simplă: fără encodere, viteze mici, urmărire de perete.
-// Tot ce depinde de robotul fizic (mâna, sensul motoarelor, ordinea senzorilor, timpii de viraj,
-// viteza) se reglează din Serial și se salvează în flash. Vezi 'h' în Serial Monitor.
 #include <Arduino.h>
 #include <Wire.h>
 #include <Preferences.h>
-#include <vl53lx_class.h>
+#include <VL53L0X.h>
 #include "config.h"
 
 struct Travel;  // prototipurile generate automat pentru .ino apar înaintea definiției
@@ -86,18 +83,15 @@ static void pwmOut(uint8_t pin, uint8_t ch, uint32_t duty) {
 #endif
 }
 
-static void driveOne(uint8_t in1, uint8_t ch1, uint8_t in2, uint8_t ch2, float u, bool brake) {
-  if (brake || fabsf(u) < 0.005f) {
-    pwmOut(in1, ch1, PWM_MAX); pwmOut(in2, ch2, PWM_MAX); return;
-  }
+// DRV8835 în mod PHASE/ENABLE: PH = sensul, EN = PWM; EN = 0 frânează (ieșirile trec pe LOW).
+static void driveOne(uint8_t ph, uint8_t en, uint8_t ch, float u, bool brake) {
+  if (brake || fabsf(u) < 0.005f) { pwmOut(en, ch, 0); return; }
   float a = clampf(MOTOR_DEADBAND + (1.0f - MOTOR_DEADBAND) * fabsf(u), 0, 1) * MOTOR_MAX_DUTY;
-  uint32_t d = (uint32_t)(a * PWM_MAX + 0.5f);
-  if (u > 0) { pwmOut(in1, ch1, PWM_MAX);     pwmOut(in2, ch2, PWM_MAX - d); }
-  else       { pwmOut(in1, ch1, PWM_MAX - d); pwmOut(in2, ch2, PWM_MAX);     }
+  digitalWrite(ph, u < 0 ? HIGH : LOW);
+  pwmOut(en, ch, (uint32_t)(a * PWM_MAX + 0.5f));
 }
 static void motorsCoast() {
-  pwmOut(PIN_ML_IN1, 0, 0); pwmOut(PIN_ML_IN2, 1, 0);
-  pwmOut(PIN_MR_IN1, 2, 0); pwmOut(PIN_MR_IN2, 3, 0);
+  pwmOut(PIN_ML_EN, 0, 0); pwmOut(PIN_MR_EN, 1, 0);
 }
 static float tgtL = 0, tgtR = 0;
 static float outL = 0, outR = 0;
@@ -106,8 +100,8 @@ static bool  brakeReq = false;
 static void writeMotors(float l, float r) {
   if (P.invL) l = -l;
   if (P.invR) r = -r;
-  driveOne(PIN_ML_IN1, 0, PIN_ML_IN2, 1, l, brakeReq);
-  driveOne(PIN_MR_IN1, 2, PIN_MR_IN2, 3, r, brakeReq);
+  driveOne(PIN_ML_PH, PIN_ML_EN, 0, l, brakeReq);
+  driveOne(PIN_MR_PH, PIN_MR_EN, 1, r, brakeReq);
 }
 static void setTarget(float l, float r) {
   brakeReq = false;
@@ -123,53 +117,50 @@ static float odomModelMm = 0;
 static inline float odomMm() { return odomModelMm; }
 
 // ---------------- Senzori ToF ----------------
-static VL53LX* tof[3];
+static VL53L0X tof[3];
 struct TofSnap { int16_t mm[3]; uint32_t t[3]; uint32_t seq[3]; };
 static TofSnap tofShared;
 static portMUX_TYPE tofMux = portMUX_INITIALIZER_UNLOCKED;
 static TofSnap S;
 static bool tofOk[3];
 
+// Toți senzorii pornesc pe aceeași adresă (0x29): îi trezim pe rând din XSHUT și le dăm adrese noi.
 static bool initTof() {
-  for (int i = 0; i < 3; i++) tof[i]->VL53LX_Off();
-  delay(10);
+  for (int i = 0; i < 3; i++) { pinMode(PIN_XSHUT[i], OUTPUT); digitalWrite(PIN_XSHUT[i], LOW); }
+  delay(20);
   bool all = true;
   for (int i = 0; i < 3; i++) {
-    int st = tof[i]->InitSensor(TOF_ADDR[i]);
-    tofOk[i] = (st == 0);
-    if (!tofOk[i]) { Serial.printf("[ToF] GPIO%d EROARE init (%d)\n", PIN_XSHUT[i], st); all = false; continue; }
-    tof[i]->VL53LX_SetMeasurementTimingBudgetMicroSeconds(TOF_TIMING_BUDGET_US);
-    tof[i]->VL53LX_StartMeasurement();
+    digitalWrite(PIN_XSHUT[i], HIGH);
+    delay(15);
+    tof[i] = VL53L0X();
+    tof[i].setBus(&Wire);
+    tof[i].setTimeout(100);
+    tofOk[i] = tof[i].init();
+    if (!tofOk[i]) {
+      Serial.printf("[ToF] GPIO%d EROARE init\n", PIN_XSHUT[i]);
+      digitalWrite(PIN_XSHUT[i], LOW);   // altfel ar ocupa 0x29 pentru următorul senzor
+      all = false; continue;
+    }
+    tof[i].setAddress(TOF_ADDR[i]);
+    tof[i].setMeasurementTimingBudget(TOF_TIMING_BUDGET_US);
+    tof[i].startContinuous();
     Serial.printf("[ToF] GPIO%d OK\n", PIN_XSHUT[i]);
   }
   return all;
 }
 
 static void tofTask(void*) {
-  int16_t lastValid[3]; uint32_t lastValidT[3];
-  for (int i = 0; i < 3; i++) { lastValid[i] = TOF_FAR_MM; lastValidT[i] = 0; }
   for (;;) {
     for (int i = 0; i < 3; i++) {
       if (!tofOk[i]) continue;
-      uint8_t ready = 0;
-      if (tof[i]->VL53LX_GetMeasurementDataReady(&ready) != 0 || !ready) continue;
-      VL53LX_MultiRangingData_t d;
-      if (tof[i]->VL53LX_GetMultiRangingData(&d) == 0) {
-        int best = TOF_FAR_MM; bool valid = false;
-        for (int j = 0; j < d.NumberOfObjectsFound; j++) {
-          if (d.RangeData[j].RangeStatus == 0) {
-            int mm = d.RangeData[j].RangeMilliMeter;
-            if (mm >= 0 && mm < best) { best = mm; valid = true; }
-          }
-        }
-        uint32_t now = millis();
-        if (valid) { lastValid[i] = best; lastValidT[i] = now; }
-        else if (lastValid[i] < 80 && now - lastValidT[i] < 200) best = lastValid[i];
-        portENTER_CRITICAL(&tofMux);
-        tofShared.mm[i] = (int16_t)best; tofShared.t[i] = now; tofShared.seq[i]++;
-        portEXIT_CRITICAL(&tofMux);
-      }
-      tof[i]->VL53LX_ClearInterruptAndStartMeasurement();
+      if ((tof[i].readReg(VL53L0X::RESULT_INTERRUPT_STATUS) & 0x07) == 0) continue;
+      uint16_t mm = tof[i].readRangeContinuousMillimeters();
+      if (tof[i].timeoutOccurred()) continue;
+      int16_t v = mm >= TOF_FAR_MM ? TOF_FAR_MM : (int16_t)mm;   // 8190/8191 = nimic în rază
+      uint32_t now = millis();
+      portENTER_CRITICAL(&tofMux);
+      tofShared.mm[i] = v; tofShared.t[i] = now; tofShared.seq[i]++;
+      portEXIT_CRITICAL(&tofMux);
     }
     vTaskDelay(1);
   }
@@ -190,8 +181,10 @@ static inline int dOpp()  { return P.hand > 0 ? dR() : dL(); }
 
 // ---------------- Bucla de control (200 Hz) ----------------
 static bool running = false, finished = false;
-static bool testRun = false;    // pornit cu 'g' din Serial: se oprește din BOOT sau orice tastă
+static bool testRun = false;    // pornit cu 'g' din Serial (ignoră modulul IR)
 static bool irBlocked = false;  // START era 1 la pornire: modulul IR e ignorat până la repornire
+static bool autoArmed = !USE_START_MODULE;   // pornire automată după AUTO_START_MS
+static uint32_t autoT0 = 0;
 static uint32_t tRun0 = 0;
 static TickType_t lastWake;
 
@@ -204,13 +197,11 @@ static void haltForever(const char* why) {
 static uint8_t stopCnt = 0;
 static void safety() {
   if (!running) return;
-  if (testRun) {
-    if (digitalRead(PIN_BUTTON) == LOW || Serial.available()) haltForever("oprit manual (test)");
-    return;
-  }
-#if !TEST_START_BUTTON
+  if (digitalRead(PIN_BUTTON) == LOW || Serial.available()) haltForever("oprit manual (BOOT sau tastă)");
+#if USE_START_MODULE
+  if (testRun) return;
   bool stop = digitalRead(PIN_START) == LOW;
-#if USE_KILL_PIN
+#if PIN_KILL >= 0
   stop = stop || digitalRead(PIN_KILL) == LOW;
 #endif
   stopCnt = stop ? stopCnt + 1 : 0;
@@ -468,6 +459,12 @@ static void runMaze() {
 // ---------------- Calibrare din Serial ----------------
 static int lastTurnTest = 90;
 
+// LED: 1 clipire = mâna stângă, 2 clipiri = mâna dreaptă.
+static bool handBlink() {
+  uint32_t p = millis() % 1200;
+  return (p < 120) || (P.hand < 0 && p >= 250 && p < 370);
+}
+
 static void printHelp() {
   Serial.println(
     "\n--- Comenzi (robotul pe masă sau în labirint) ---\n"
@@ -477,11 +474,11 @@ static void printHelp() {
     " a/b inversează sensul motorului stâng / drept\n"
     " 9/8 pivotare 90 / 180 grade spre stânga\n"
     " +/- timpul ultimei pivotări testate +10 / -10 ms\n"
-    " v   măsoară viteza (robot cu fața la un perete aflat la 60-120 cm)\n"
+    " v   măsoară viteza (robot cu fața la un perete aflat la 60-110 cm)\n"
     " f   mergi o celulă (30 cm) pe culoar\n"
     " q/w trim stânga / dreapta (dacă trage într-o parte)\n"
     " l/r mâna stângă / dreaptă\n"
-    " g   cursă de test fără telecomandă (pornește în 2 s; oprire: BOOT sau orice tastă)\n"
+    " g   cursă (pornește în 2 s; oprire: BOOT sau orice tastă)\n"
     " x   afișează parametrii   z  revino la valorile implicite   h  ajutor\n");
 }
 
@@ -500,7 +497,7 @@ static void motorTest(bool left) {
 
 static void measureSpeed() {
   readSnapshot();
-  if (dF() < 500 || dF() > 1500) { Serial.printf("[VIT] F=%d: pune robotul la 60-120 cm de un perete\n", dF()); return; }
+  if (dF() < 500 || dF() > 1150) { Serial.printf("[VIT] F=%d: pune robotul la 60-110 cm de un perete\n", dF()); return; }
   int f0 = 0; uint32_t tA = 0, t0 = millis();
   while (millis() - t0 < 1500 && dF() > 300) {
     setDrive(V_RUN, 0); step();
@@ -519,6 +516,7 @@ static void serialCommands() {
   if (!Serial.available()) return;
   char c = Serial.read();
   if (c == '\n' || c == '\r' || c == ' ') return;
+  if (autoArmed) { autoArmed = false; Serial.println("[AUTO] pornirea automată e anulată; pornești cu 'g'"); }
   running = false;
   lastWake = xTaskGetTickCount();
   switch (c) {
@@ -569,32 +567,30 @@ void setup() {
   pinMode(PIN_LED, OUTPUT);
 #endif
   pinMode(PIN_BUTTON, INPUT_PULLUP);
+#if USE_START_MODULE
   // Pull-down: fără modul IR conectat robotul nu pornește singur.
   pinMode(PIN_START, INPUT_PULLDOWN);
-#if USE_KILL_PIN
+#if PIN_KILL >= 0
   pinMode(PIN_KILL, INPUT_PULLDOWN);
 #endif
-  pwmSetup(PIN_ML_IN1, 0); pwmSetup(PIN_ML_IN2, 1);
-  pwmSetup(PIN_MR_IN1, 2); pwmSetup(PIN_MR_IN2, 3);
+#endif
+  pinMode(PIN_ML_PH, OUTPUT); pinMode(PIN_MR_PH, OUTPUT);
+  pwmSetup(PIN_ML_EN, 0); pwmSetup(PIN_MR_EN, 1);
   motorsCoast();
 
-  prefs.begin("maze2", false);
+  prefs.begin("maze3", false);
   loadParams();
   Serial.println("\n=== MazeRunner (simplu) – Robochallenge Maze ===");
   printParams();
 
-#if !TEST_START_BUTTON
+#if USE_START_MODULE
   if (digitalRead(PIN_START) == HIGH) {
     irBlocked = true;
     Serial.println("[ERR] START=1 la pornire! Modulul IR e ignorat. Cere arbitrului STOP, apoi repornește robotul.");
   }
 #endif
 
-#if ESP_ARDUINO_VERSION_MAJOR >= 3
-  Wire.setBufferSize(256);
-#endif
   Wire.begin(PIN_SDA, PIN_SCL, I2C_FREQ);
-  for (int i = 0; i < 3; i++) { tof[i] = new VL53LX(&Wire, PIN_XSHUT[i]); tof[i]->begin(); }
   for (int i = 0; i < 3; i++) { tofShared.mm[i] = TOF_FAR_MM; tofShared.t[i] = 0; tofShared.seq[i] = 0; }
   // Reîncearcă până pornesc toți senzorii (un fir mișcat se poate repara fără reset).
   while (!initTof()) {
@@ -604,6 +600,7 @@ void setup() {
   xTaskCreatePinnedToCore(tofTask, "tof", 16384, nullptr, 3, nullptr, 0);
   delay(100);
   printHelp();
+  autoT0 = millis();
 }
 
 void loop() {
@@ -615,21 +612,31 @@ void loop() {
   if (btn && !btnDown) btnDown = millis();
   if (!btn && btnDown) {
     uint32_t held = millis() - btnDown; btnDown = 0;
-    if (held > 30 && held < 800) { P.hand = -P.hand; saveParams(); printParams(); }
+    if (held > 30 && held < 800) {
+      P.hand = -P.hand; saveParams(); printParams();
+      autoT0 = millis();   // după schimbarea mâinii, numărătoarea reîncepe
+    }
   }
 
   bool go = false;
-#if TEST_START_BUTTON
-  if (btn && btnDown && millis() - btnDown > 1000) {
-    Serial.println("[TEST] start în 2 s..."); delay(2000); go = true; btnDown = 0;
-  }
-#else
+#if USE_START_MODULE
   static uint8_t hi = 0;
   hi = digitalRead(PIN_START) == HIGH ? hi + 1 : 0;
   go = hi >= 3 && !irBlocked;
+#else
+  if (autoArmed) {
+    uint32_t el = millis() - autoT0;
+    static uint32_t lastSec = 0xFFFFFFFF;
+    uint32_t sec = (AUTO_START_MS - min(el, (uint32_t)AUTO_START_MS) + 999) / 1000;
+    if (sec != lastSec) { lastSec = sec; Serial.printf("[AUTO] start în %lu s (orice tastă = anulează)\n", (unsigned long)sec); }
+    go = el >= AUTO_START_MS;
+    if (go) autoArmed = false;
+  }
 #endif
+  ledSet(autoArmed ? (millis() / 250) & 1 : handBlink());
   if (go) {
     Serial.println("[GO] Start!");
+    ledSet(true);
     running = true;
     runMaze();
   }

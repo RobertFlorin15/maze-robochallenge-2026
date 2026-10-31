@@ -1,32 +1,33 @@
 #pragma once
 #include <stdint.h>
 
-// ---------------- Pini (după „Maze Electronica Schema Finala.pdf”) ----------------
+// ---------------- Pini (după „Maze_ESP32_Componente_si_Conexiuni.docx”) ----------------
 #define PIN_SDA            21
 #define PIN_SCL            22
 #define I2C_FREQ           400000
 
-// Senzorii fizici, în ordinea XSHUT: 0 = GPIO15 (sus în schemă), 1 = GPIO2 (mijloc), 2 = GPIO23 (jos).
-// Care e L/F/R se alege din Serial cu comanda 'p' (se salvează), nu trebuie reîncărcat codul.
-static const uint8_t PIN_XSHUT[3] = { 15, 2, 23 };
-static const uint8_t TOF_ADDR[3]  = { 0x10, 0x12, 0x14 };
+// Senzori VL53L0X, în ordinea XSHUT: 0 = GPIO25 (stânga), 1 = GPIO26 (față), 2 = GPIO27 (dreapta).
+// Dacă la test coloanele L/F/R nu corespund, comanda 'p' din Serial schimbă ordinea (se salvează).
+static const uint8_t PIN_XSHUT[3] = { 25, 26, 27 };
+static const uint8_t TOF_ADDR[3]  = { 0x30, 0x31, 0x32 };   // adrese I2C pe 7 biți
 
-#define PIN_ML_IN1         25
-#define PIN_ML_IN2         26
-#define PIN_MR_IN1         27
-#define PIN_MR_IN2         14
+// DRV8835 în mod PHASE/ENABLE (MODE la 3V3): PH = sens, EN = PWM.
+#define PIN_ML_PH          18   // APHASE  – motor stâng (AOUT)
+#define PIN_ML_EN          19   // AENABLE
+#define PIN_MR_PH          23   // BPHASE  – motor drept (BOUT)
+#define PIN_MR_EN          32   // BENABLE
+// Encoderele sunt cablate (stânga 34/35, dreapta 36/39) dar nu sunt folosite.
 
-#define PIN_START          18
-#define PIN_KILL           19
-#define USE_KILL_PIN       1
+// 0 = fără telecomandă IR: pornire automată la AUTO_START_MS după alimentare.
+// Orice comandă din Serial anulează pornirea automată (atunci pornești cu 'g').
+#define USE_START_MODULE   0
+#define AUTO_START_MS      20000
+#define PIN_START          33   // folosit doar cu USE_START_MODULE 1
+#define PIN_KILL           -1   // -1 = fără pin KILL
 
-// GPIO2 (LED-ul plăcii) e XSHUT pentru un senzor, deci LED-ul rămâne oprit.
-#define USE_LED            0
+#define USE_LED            1
 #define PIN_LED            2
-#define PIN_BUTTON         0
-
-// 1 = pornire din butonul BOOT (ținut 1 s) în loc de modulul IR. 0 la competiție!
-#define TEST_START_BUTTON  0
+#define PIN_BUTTON         0    // BOOT: apăsare scurtă = schimbă mâna; în cursă = oprire
 
 // ---------------- Geometrie (mm) ----------------
 #define CELL_MM                300.0f
@@ -66,7 +67,7 @@ static const uint8_t TOF_ADDR[3]  = { 0x10, 0x12, 0x14 };
 #define DEF_MM_PER_S_RUN    200.0f  // viteza reală la V_RUN; comanda 'v' o măsoară
 
 // ---------------- ToF ----------------
-#define TOF_TIMING_BUDGET_US 20000
+#define TOF_TIMING_BUDGET_US 33000
 #define TOF_FAR_MM           2000
 #define TOF_STALE_MS         150
 
